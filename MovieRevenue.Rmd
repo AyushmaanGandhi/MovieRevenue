@@ -1,0 +1,537 @@
+---
+title: "Predicting Movie Revenues"
+author: "Ayushmaan Gandhi"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+
+## Introduction
+
+#### Overview
+The film industry is a complex and dynamic domain that involves significant investments, creative talent, and a wide range of factors that contribute to a movie's success. Predicting the revenue of movies accurately can be challenging, as it depends on numerous variables such as the movie's genre, budget, release date, and more. In this project, we aim to develop a machine learning model that predicts the revenue of movies based on a comprehensive set of predictors derived from the IMDb dataset.
+
+#### Objective
+The primary objective of this project is to develop a regression model that accurately predicts the revenue of future movies based on a set of predictors. By analyzing the IMDb data set, we aim to build a robust predictive model that can assist stakeholders in the film industry, including producers, investors, and distributors, in making informed decisions.
+
+#### Dataset Description
+The IMDb data set is a valuable resource for analyzing and understanding the movie industry. It provides a diverse range of information for each movie, including its title, release date, user ratings, genres, overviews, cast and crew members, original titles, production status, original languages, budgets, revenues, and countries of origin. To understand more about each variable, please view the codebook that is attached in the zip file, and is also shows a but further down below. This data set allows us to explore various aspects of movies and extract relevant features for predicting revenue. However, not all of these variables will be useful in our prediction, as we will soon see. 
+
+## Link to data source
+https://www.kaggle.com/datasets/ashpalsingh1525/imdb-movies-dataset
+I obtained this data set from Kaggle on June 10, 2023. It was uploaded to the platform by Ashpal Singh.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+## Loading and Tidying Data
+Let's get all of our necessary packages loaded in.
+```{r Load Packages}
+library(recipes)
+library(pROC)
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(corrr)
+library(corrplot)
+library(discrim)
+library(kknn)
+library(themis)
+library(glmnet)
+library(dplyr)
+library(ranger)
+library(vip)
+library(splitstackshape)
+#install.packages("naniar")
+library(naniar)
+library(janitor)
+```
+Let's load in our data set and take a look at the first few rows.
+```{r Load Data}
+movies <- read_csv('imdb_movies.csv')
+head(movies)
+```
+
+Here is the codebook for the data set we have now (which can also be found in the zip file):
+
+#### **imdb_movies codebook (uncleaned raw data)**
+
+names = movie name (character)
+
+date_x = release date (character)
+
+score = user rating (numeric)
+
+genre = genre of the movie (character)
+
+overview = an overview of the movie (character)
+
+crew = cast and crew members (character)
+
+orig_title = original title of movie (character)
+
+status = release status (character)
+
+orig_lang = originally released in this language (character)
+
+budget_x = movie budget (numeric)
+
+revenue = revenue generated worldwide (numeric)
+
+country = country movie was released in (character)
+
+We see that there are 12 columns total right now, one of these being our response: revenue. Let's take a look at the remaining 11 predictors and assess which ones we truly need. Right away, it is obvious that the overview and original title of the movie are irrelevant as predictors. Furthermore, this data set only contains released movies, so the status variable is also unnecessary. Finally, since our ultimate goal is to predict the revenue for future movies, it makes no sense to have audience score as a predictor. Audience score is only available for movies that have already been released, so we would not be able to use this for predicting the revenue of movies that are yet to be released.
+
+Let's go ahead and remove the aforementioned variables: "score", "overview", "orig_title", and "status"
+```{r Removal of Columns}
+# get rid of unnecessary predictors
+movies <- subset(movies, select = -c(score, overview, orig_title, status))
+```
+I don't think our data set is still quite ready to work with. If you take a look at the "crew" column above, there are multiple actor names listed under each film. While the crew of a film is definitely an important factor in its success, the format of this data is a bit tricky to work with. Dummy encoding all the possible values of cast and crew can lead to a high-dimensional feature space, which can negatively impact the model's performance and increase computational complexity.
+
+As an alternative, we could rather look at the number of Oscar winners in a particular crew, since this information would be much easier to handle than a list of crew members' names. Let's make a new variable called "number_of_oscar_winners". In order to go about this, I first found a data set called "Oscars". Here is a link to this dataset: https://www.openintro.org/data/index.php?data=oscars Let's take a look at its first few rows.
+```{r Load Oscars}
+oscars <- read_csv('oscars.csv')
+head(oscars)
+```
+
+For our purposes, all we simply need is a list of the best actor/ best actress award winners. Let's extract this specific column from the data set.
+```{r List of Oscar Winners}
+winners <- unique(oscars$name)
+winners
+```
+
+Great, now that we have a list of every Oscar best actor/ best actress winner from 1929-2019 called "winners", we can iterate over each movie, and for each movie, we'll count the number of actors who are present in "winners". If an actor is found in the list, the count num_oscar_winners will be incremented by 1. Finally, the count will be assigned to our new column 'number_of_oscar_winners' for the corresponding movie.
+```{r Oscar Winners Creation}
+movies$number_of_oscar_winners <- 0
+
+# Iterate over each row of the data frame
+for (i in 1:nrow(movies)) {
+  crew <- strsplit(movies$crew[i], ",")[[1]]
+  
+  # Count the number of Oscar-winning crew members for the current movie
+  num_oscar_winners <- 0
+  
+  # Iterate over each crew member in the 'crew' column
+  for (crew_member in crew) {
+    if (trimws(crew_member) %in% winners) {
+      num_oscar_winners <- num_oscar_winners + 1
+    }
+  }
+  
+  # Assign the count to the 'number_of_oscar_winners' column for the current movie
+  movies$number_of_oscar_winners[i] <- num_oscar_winners
+}
+
+# No longer need 'crew' column
+movies <- subset(movies, select = -c(crew))
+```
+
+We are facing a similar issue with the 'genre' column. There are multiple values for each observation. While we could choose to one hot-encode this column, another efficient solution would be to extract the main genre for each film from the multiple genres. Lucky for us, the genres are already listed in order of their prevalence in the film. So by simply extracting the first genre from each list of genres, we are choosing the main genre of the movie. Let's create a new column called "main_genre" and get rid of "genre". 
+```{r Main Genre Creation}
+movies$main_genre <- sapply(strsplit(movies$genre, ",\\s*"), function(x) x[1])
+movies <- subset(movies, select = -c(genre))
+```
+
+Let's also take a look at the release date variable. While the release date is definitely an important factor in predicting the success of a movie, I believe that we may get more value from this information by separately looking at the month and year. By creating a new column called release_month, we will be better able to realize any seasonal trends that take place. Doing the same for year will be helpful as well. Let's create these two columns and remove our old date column.
+```{r Making Date Useful}
+movies$date_x <- as.Date(movies$date_x, format = "%m/%d/%Y")
+
+# Extract month and year as separate variables
+movies$release_month <- format(movies$date_x, "%m")
+movies$release_year <- format(movies$date_x, "%Y")
+
+# Date is now unnecessary
+movies <- subset(movies, select = -c(date_x))
+```
+It seems like we have finally made all of our necessary modifications to the data set. Here is the codebook for the updated, cleaned data set(which can also be found in the zip file): 
+
+#### **movies_cleaned codebook (cleaned data used for project)**
+
+names = movie name (character)
+
+orig_lang = originally released in this language (character)
+
+country = country movie was released in (character)
+
+main_genre = main_genre of the movie (character)
+
+release_month = month of release (character)
+
+release_year = year of release (character)
+
+budget_x = movie budget (numeric)
+
+revenue = revenue generated worldwide (numeric)
+
+number_of_oscar_winners = number of Oscar award winners in crew of film (numeric)
+
+Let's take a look at our updated version of movies and save it:
+```{r Updated Movies}
+head(movies)
+write_csv(movies, "movies_cleaned.csv")
+```
+
+## Missing Data
+Before moving forward, we must first deal with our missing data. Through our visualization, we can see that less than .1% of our data is missing. Since we are missing such a miniscule amount, we can simply drop this data without it significantly altering our results. 
+```{r Missing Data}
+vis_miss(movies)
+# less than .01 is missing, so let's drop the missing values
+movies <- movies %>% drop_na()
+vis_miss(movies)
+```
+
+## Exploratory Data Analysis
+
+Before we start our EDA, let's convert our categorical variables to factors.
+```{r Change Characters to Factors}
+sapply(movies,class)
+movies$names <- as.factor(movies$names)
+movies$main_genre <- as.factor(movies$main_genre)
+movies$orig_lang <- as.factor(movies$orig_lang)
+movies$country <- as.factor(movies$country)
+movies$release_month <- as.factor(movies$release_month)
+movies$release_year <- as.factor(movies$release_year)
+sapply(movies,class)
+```
+
+It's time for some exploratory data analysis. Let's take a look at some visualizations to help us better understand the variables and response that we're working with. 
+
+Let's first take a look at the distribution of our response variable: revenue.
+```{r EDA 1}
+# dimensions of dataset
+dim(movies)
+# distribution of revenue
+movies %>% 
+  ggplot(aes(x = revenue)) +
+  geom_histogram(bins = 600) +
+  theme_bw()
+```
+
+It seems like most of the movie revenues are between 0 and 1e+09. Let's zoom in so we can get a closer look. Upon zooming in, we see that most values seem to be evenly spread out between 1.25e+07 and 1e+09.
+```{r EDA 2}
+# zoom in
+movies %>% 
+  ggplot(aes(x = revenue)) +
+  geom_histogram(bins = 600) +
+  theme_bw() +
+  xlim(0, 100000000) 
+```
+
+Now lets take a look at a correlation plot amongst our numeric variables. Using a correlation plot on our numeric predictors is useful as it provides valuable insights into the relationships and dependencies between different variables.From the plot, we can see that budget and revenue are highly positively correlated. This makes sense, since higher budgets often allow for better quality films.
+```{r EDA 3}
+# correlation plot
+movies %>% 
+  select(is.numeric) %>% 
+  cor() %>% 
+  corrplot(type = 'lower', diag = FALSE, 
+           method = 'color')
+```
+
+Now let's examine the counts of our main_genre. We see that the most frequent genres in our data set are drama, action, and comedy. The least frequent genres include mystery, music, war, western, history, and TV movie.
+```{r EDA 4}
+movies %>%
+ count(main_genre) %>%
+ ggplot(aes(x = n, y = reorder(main_genre, n))) +
+ geom_col() +
+ theme_bw()
+```
+
+Let's now examine the relationship between main_genre and revenue by using a box plot. We see that documentary films seem to have the highest revenue, which is surprising because documentary films are usually not released in theaters, and theater revenue makes up a significant portion of overall revenue.
+```{r EDA 5}
+movies %>% 
+  ggplot(aes(x = revenue, y = reorder(main_genre, revenue))) + 
+  geom_boxplot() +
+  labs(y = "Main Genre", x = "Revenue") +
+  theme_bw()
+```
+
+Let's revisit the relationship between revenue and budget that we uncovered through our correlation plot. Let's plot them against each other. We notice that they have a positive linear relationship, most likely due to the reasoning mentioned earlier.
+```{r EDA 6}
+# revenue vs budget
+movies %>% 
+  ggplot(aes(x=budget_x, y=revenue)) + 
+  geom_jitter(width = 0.5, size = 1) +
+  geom_smooth(method = "lm", se =F, col="darkred") +
+  labs(title = "Revenue vs. Budget")
+```
+
+Let's take a look at the count of movies based on the number of oscar winners. It looks like most movies have 0 Oscar winners, which makes sense since Oscar winners make up just a small percentage of all the actors out there.
+```{r EDA 7}
+# Create a bar plot showing the count for each number of oscar winners
+ggplot(movies, aes(x = number_of_oscar_winners)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Count of Movies by Number of Oscar Winners", x = "Number of Oscar Winners", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+```
+
+Let's also take a look at the average revenue based on the amount of Oscar winners in a film. Surprisingly, movies with 0 Oscar winners have the highest average revenue. 
+```{r EDA 8}
+# Create a bar plot showing the average revenue for each number of oscar winners
+ggplot(movies, aes(x = number_of_oscar_winners, y = revenue)) +
+  geom_bar(stat = "summary", fun = "mean", fill = "steelblue") +
+  labs(title = "Average Revenue by Number of Oscar Winners", x = "Number of Oscar Winners", y = "Average Revenue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+```
+
+Let's take a look at a plot of revenue vs the year a movie was released. This will help us notice any trends that take place over time. It looks like overall, movies tend to make more money now than they did in the 1900's. However, I am unsure regarding whether or not the revenue has been adjusted for inflation. If it has not, this could certainly be one of the reasons for higher revenues as time goes on.
+```{r EDA 9}
+# revenue vs release year
+movies %>%
+  ggplot(aes(x = as.numeric(as.character(release_year)), y = revenue)) +
+  geom_jitter(width = 0.5, size = 1) +
+  geom_smooth(method = "lm", se = FALSE, col = "darkred") +
+  labs(title = "Revenue vs. Release Year") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_continuous(breaks = seq(min(as.numeric(as.character(movies$release_year))), max(as.numeric(as.character(movies$release_year))), by = 5))
+```
+
+Lastly, let's take a look at some grouped summaries as well, so that we can see compare the mean value of revenue amongst different levels of a given variable. These are easily interpretable, so I will not be providing any explanations for them.
+```{r Count Summaries}
+movies %>% 
+  group_by(main_genre) %>% 
+  summarise(avg_rev = mean(revenue),
+            count = n()) %>% 
+  arrange(avg_rev)
+
+movies %>% 
+  group_by(number_of_oscar_winners) %>% 
+  summarise(avg_rev = mean(revenue),
+            count = n()) %>% 
+  arrange(avg_rev)
+
+movies %>% 
+  group_by(country) %>% 
+  summarise(avg_rev = mean(revenue),
+            count = n()) %>% 
+  arrange(avg_rev)
+
+movies %>% 
+  group_by(orig_lang) %>% 
+  summarise(avg_rev = mean(revenue),
+            count = n()) %>% 
+  arrange(avg_rev)
+
+movies %>% 
+  group_by(release_month) %>% 
+  summarise(avg_rev = mean(revenue),
+            count = n()) %>% 
+  arrange(avg_rev)
+```
+
+## Data Split into Training and Testing
+Data splitting is a crucial step in our project as it involves dividing our data set into training and testing sets. The training set is used to teach our machine learning model, while the testing set is employed to evaluate its performance on unseen data. This process allows us to assess how well our model generalizes and predicts movie revenue accurately. By separating the data in this manner, we can try to ensure that our model is reliable. Let's split the data such that 80% of it is for training and 20% of it is for testing. We will verify that it has been split correctly as well.
+```{r Train/Test Split}
+# split data set
+set.seed(3435)
+movies_split <- initial_split(movies, prop = 0.80,
+                                strata = revenue)
+movies_train <- training(movies_split)
+movies_test <- testing(movies_split)
+
+# verify correct split
+dim(movies_train)
+dim(movies_test)
+```
+## Recipe Creation
+We are now entering the recipe creation phase. In this phase, we construct a recipe to preprocess our movie data set before training the machine learning model. We have chosen to include all of our remainig predictors in the recipe. The recipe includes steps such as step_dummy for converting categorical variables into numerical representations, step_center to center the predictors by subtracting the mean, and step_scale to standardize the variables by dividing them by their standard deviation. These transformations ensure that the predictors are on a consistent scale and help the model extract meaningful patterns from the data. By applying these preprocessing steps, we optimize the model's performance and enable accurate revenue predictions for new movies. 
+```{r Recipe Creation}
+movies_recipe <- recipe(revenue ~ main_genre + country + orig_lang + release_month + release_year + number_of_oscar_winners + budget_x, data = movies_train)%>% 
+  step_dummy(main_genre, country, orig_lang, release_month, release_year) %>%
+  # Center all predictors
+  step_center() %>%
+  # Scale all predictors
+  step_scale()
+```
+
+## Cross-validation and Stratified Sampling
+To ensure the reliability and generalization of our machine learning model, we employ cross-validation and stratified sampling techniques. By using vfold_cv with v = 10 and strata = revenue, we create 10 folds for cross-validation, where each fold serves as both a training and validation set. This allows us to evaluate the model's performance consistently across different subsets of the data. The stratified sampling ensures proportional representation of revenue levels within each fold, reducing bias and providing a more realistic evaluation. These techniques enable us to obtain reliable performance metrics, assess the model's generalization capabilities, and select the most suitable model for predicting movie revenue accurately.
+```{r K-Fold Cross Validation}
+movies_folds <- vfold_cv(movies_train, v = 10, strata = revenue)
+```
+
+## Model Building
+In the model building phase, we consider three models: linear regression, K-nearest neighbors (KNN), and random forests. Linear regression establishes a linear relationship between predictors and revenue, while KNN predicts revenue based on neighboring instances, and random forests combine multiple decision trees.
+
+We evaluate these models using root mean square error (RMSE). RMSE is a suitable evaluation metric for our project as it quantifies the average prediction error in terms of revenue. It allows us to compare the performance of different models in a meaningful way and select the one with the lowest RMSE, indicating the model with the smallest average deviation from the true revenue values.
+
+Let's start off the process by configuring the model, including the selection of the desired model, parameter tuning preferences, the model's engine, and specifying the mode (which is regression in our case).
+```{r Set Up Models}
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+
+knn_model <- nearest_neighbor(neighbors = tune()) %>% 
+  set_engine("kknn") %>% 
+  set_mode("regression")
+
+rf_spec <- rand_forest(mtry = tune(), 
+                       trees = tune(), 
+                       min_n = tune()) %>% 
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("regression")
+```
+
+Now we must set up the workflow for the model and incorporate both the model and the recipe into it.
+```{r Set Up Workflows}
+lm_wflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(movies_recipe)
+
+knn_wflow <- workflow() %>% 
+  add_model(knn_model) %>% 
+  add_recipe(movies_recipe)
+
+rf_wflow <- workflow() %>% 
+  add_recipe(movies_recipe) %>% 
+  add_model(rf_spec)
+```
+
+Next, we will define tuning grids that outline the parameter ranges and the number of levels to explore during the tuning process.
+```{r Grids}
+knn_grid <- grid_regular(neighbors(range = c(1,10)), levels = 10)
+rf_grid <- grid_regular(mtry(range = c(1, 8)), trees(range = c(200,600)), min_n(range = c(10,20)), levels = 6)
+```
+
+
+## Model Tuning and Autoplot Analysis
+
+Now, we will perform model tuning by specifying the workflow, the number of folds for k-fold cross-validation, and the tuning grid with the chosen parameters to tune. We will also save the tuned models to an RDA file to prevent the need for re-running the models in the future. They will be loaded right back in.
+
+Examining the autoplot for our KNN tuned model, we observe a clear trend in its performance as the number of neighbors increases. Initially, with a smaller number of neighbors, the model demonstrates relatively poor performance, indicated by a low R-squared value and a high RMSE. This can be attributed to the model's inability to capture the underlying patterns and complexities in the data with limited information from a small number of neighbors.
+However, as the number of neighbors increases, we observe a significant improvement in both R-squared and RMSE. This suggests that incorporating more neighbors allows the model to capture a larger pool of information and make more accurate predictions. The model's performance continues to improve up to approximately 6 neighbors, after which the improvements become marginal.
+```{r Tune Knn, eval=FALSE}
+# K NEAREST NEIGHBORS
+knn_tune <- tune_grid(
+    knn_wflow,
+    resamples = movies_folds,
+    grid = knn_grid
+)
+
+save(knn_tune, file = "knn_tune.rda")
+```
+```{r Load Knn}
+load("knn_tune.rda")
+autoplot(knn_tune) + theme_minimal()
+```
+
+Analyzing the autoplot for our Random Forest model, we observe an interesting trend regarding the number of randomly selected predictors. As the number of predictors increases, we see a decrease in RMSE, indicating an improvement in the model's predictive accuracy. This suggests that including a larger subset of predictors in each tree's construction leads to better capturing the underlying patterns and variability in the data.The fact that increasing the number of randomly selected predictors leads to a decrease in RMSE suggests that our dataset contains meaningful and informative predictors. Otherwise, the plots seem to remain fairly the same across different levels and different numbers of trees.
+```{r Tune RF, eval=FALSE}
+# RANDOM FOREST
+rf_tune_res <- tune_grid(
+  rf_wflow,
+  resamples = movies_folds,
+  grid = rf_grid
+)
+
+save(rf_tune_res, file = "rf_tune_res.rda")
+```
+```{r Load RF}
+load("rf_tune_res.rda")
+autoplot(rf_tune_res) + theme_minimal()
+```
+
+Let's also fit our linear regression model to the folds now, due to the fact that we did not have to tune it earlier.
+```{r Linear Fitting}
+lm_fit <- fit_resamples(lm_wflow, resamples = movies_folds)
+```
+
+## Collecting Metrics
+Great, now we can move on to collecting the metrics of our models. We will find the "best" one for each type of model based on RMSE, as explained above.
+```{r Collect Metrics}
+load("knn_tune.rda")
+load("rf_tune_res.rda")
+
+best_lm <- collect_metrics(lm_fit) %>% slice(1)
+best_lm
+
+best_knn <- select_by_one_std_err(knn_tune,
+                          metric = "rmse",
+                          desc(neighbors)
+                          )
+best_knn
+
+best_rf <- show_best(rf_tune_res, metric = 'rmse', n = 1)
+best_rf
+```
+We can see that the best KNN model is that with 10 neighbors, and the best Random Forest model is that with an mtry of 8 and 360 trees. Now that we have our models with the best RMSE, let's create a visualization so that we can easily compare them amongst each other.
+```{r Visualization of Best Models}
+models <- data.frame(Model = c("Linear Regression", "K Nearest Neighbors", "Random Forest"),
+                         RMSE = c(best_lm$mean, best_knn$mean, best_rf$mean))
+
+# create plot of RMSE values
+ggplot(models, aes(x=Model, y=RMSE)) +
+  geom_bar(stat = "identity", aes(fill = Model)) +
+  theme(legend.position = "none") +
+  labs(title = "Comparing RMSE by Model")
+```
+
+It's a bit difficult to tell which one has the lowest RMSE based solely on the bar plot. Let's compare the actual values side by side.
+```{r RMSE Tibble}
+# Creating a tibble of all the models and their RMSE
+final_compare_tibble <- tibble(Model = c("Linear Regression", "K Nearest Neighbors", "Random Forest"), RMSE = c(best_lm$mean, best_knn$mean, best_rf$mean))
+
+# Arranging by lowest RMSE
+final_compare_tibble <- final_compare_tibble %>% 
+  arrange(RMSE)
+
+final_compare_tibble
+```
+## Best Model
+Looks like our linear regression model had the lowest RMSE out of the three with an RMSE of 198,162,128. Note that even though this is our best model, I believe that the RMSE is still quite high.
+```{r Best Model}
+best_lm <- collect_metrics(lm_fit) %>% slice(1)
+best_lm
+```
+## Fit to Training Data
+Let's go ahead and fit our best model to the training data. After evaluating several models, we have determined that the linear regression model performs the best, exhibiting a mean RMSE of 198,162,128. To accomplish this, we finalize the linear regression workflow using lm_wflow and the selected parameters best_lm. By fitting the lm_final_workflow to the training data (movies_train), we train the model to learn from the predictors and corresponding revenue values. This step is crucial as it allows us to create a trained model that can accurately predict movie revenue for future observations, incorporating all the preprocessing steps and parameter configurations we have determined to be optimal.
+```{r Fit to Training Data}
+lm_final_workflow <- finalize_workflow(lm_wflow, best_lm)
+lm_final <- fit(lm_final_workflow, data = movies_train)
+```
+
+## Best Model Fit to Testing Set
+Excitingly, we now proceed to test our best model on the testing data. After applying the augment function to the lm_final model with the testing data movies_test, we calculate the root mean square error (RMSE) using the rmse function. The obtained RMSE value is 196,471,503, which is lower than the RMSE observed during the training cross-validation folds. This lower RMSE on the testing data suggests that our model generalizes decently and performs effectively on unseen movie instances. It demonstrates the model's ability to fairly accurately predict revenue values for new movies outside the training data set.
+
+Although it's lower than the RMSE observed during the training cross-validation folds, it is still quite a high RMSE. Let's take a look at the minimum and maximum values of revenue, in order to gain a better understanding of the RMSE in context. Since the range of revenue is 0 to 2,923,706,026, the RMSE of 196,471,503 is somewhat decent in comparison. Still, it is an extremely high RMSE, and it definitely has major room for improvement.
+
+We also assess the model's goodness of fit using the coefficient of determination, commonly known as R-squared. The R-squared value indicates the proportion of the variance in the revenue that can be explained by our model. On the testing data, our model achieved an R-squared value of 0.528. This R-squared value of 0.528 implies that approximately 52.8% of the variance in the revenue can be attributed to the predictors included in our model. While this indicates a moderate level of predictive power, it also suggests that there is still room for improvement. 
+```{r Fit to Testing Set}
+augment(lm_final, new_data = movies_test) %>%
+  rmse(revenue, .pred) 
+range(movies$revenue)
+augment(lm_final, new_data = movies_test) %>%
+  rsq(revenue, .pred)
+```
+### Plot of Predicted Values vs. Actual Values
+The plot of predicted values versus expected values provides a visual representation of how well the model's predictions align with the actual revenue values. By examining the relationship between the predicted and expected values, we can assess the model's overall performance and identify any systematic deviations or patterns in the prediction errors. The model did not do too well, as the points should have fallen along a straight line.
+```{r Predicted VS Actual}
+movies_test_res_lm <- predict(lm_final, new_data = movies_test %>% select(-revenue))
+movies_test_res_lm <- bind_cols(movies_test_res_lm, movies_test %>% select(revenue))
+
+movies_test_res_lm %>% 
+  ggplot(aes(x = .pred, y = revenue)) +
+  geom_point(alpha = 0.2) +
+  geom_abline(lty = 1) +
+  theme_bw() +
+  coord_obs_pred() +
+  labs(title = "Predicted Values vs. Actual Values")
+```
+
+## Conclusion
+In conclusion, this project aimed to predict movie revenue using various predictors derived from the IMDB dataset. We employed machine learning techniques, including linear regression, K-nearest neighbors, and random forests, to build predictive models. The evaluation of these models was based on metrics such as RMSE and R-squared.
+
+After thorough analysis, we found that the linear regression model emerged as the best-performing model. It achieved a mean RMSE of 198,162,128 during cross-validation, indicating its ability to capture revenue patterns in a mediocre manner. Upon testing this model on unseen data, we obtained a lower RMSE of 197,960,786, signifying its good generalization performance. The model also achieved an R-squared value of 0.528 on the testing data, suggesting that approximately 52.8% of the revenue variability can be explained by the selected predictors.
+
+The results obtained from this project demonstrate the potential of machine learning algorithms in predicting movie revenue. However, it is worth noting that there is still lots of room for improvement, as the models' performance was not too great. 
+
+While the RMSE is fairly decent in context of our response variable, it is still much higher than we would like it to be, as it could still be greatly reduced from 197,960,786. Our plot of predicted vs actual values also indicates that the model did not perform as well as it could have. Further exploration and feature engineering could be undertaken to identify additional relevant predictors that could better capture the revenue variations. For instance, movie run time, movie directors, etc. could also all play significant roles in predicting revenue. It may also be more efficient to regard all genres, rather than only looking at main genre like we did.
+
+Despite these limitations, this project provides valuable insights into the prediction of movie revenue using machine learning techniques. The findings can contribute to the understanding of revenue determinants in the film industry and serve as a foundation for future research and development of more sophisticated models.
