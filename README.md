@@ -14,6 +14,9 @@ This is the rendered output from the RMarkdown file in HTML format. While you ca
 ### 3. [VIEW_PROJECT_HERE.md](https://github.com/AyushmaanGandhi/MovieRevenue/blob/main/VIEW_PROJECT_HERE.md)
 Open this file to access the direct link to view the rendered HTML version of the project via GitHub Pages. This will show you the results and visualizations of the project in a web-friendly format.
 
+### 4. .csv files
+These files contain the data.
+
 ## Viewing the Project
 
 For the best viewing experience, I recommend checking out the project through the GitHub Pages link available in [VIEW_PROJECT_HERE.md](https://github.com/AyushmaanGandhi/MovieRevenue/blob/main/VIEW_PROJECT_HERE.md).
