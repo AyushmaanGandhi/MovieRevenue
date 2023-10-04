@@ -1,1 +1,1 @@
-To view the project in its optimal formal, click [here](https://ayushmaangandhi.github.io/MovieRevenue/MovieRevenue.html).
+To view the project in its optimal formal, click [here](https://ayushmaangandhi.github.io/MovieRevenue/Output.html).
